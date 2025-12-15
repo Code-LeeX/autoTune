@@ -1,0 +1,42 @@
+# Core FastAPI Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+
+# Audio Processing
+librosa==0.10.1
+soundfile==0.12.1
+numpy==1.24.4
+scipy==1.11.4
+
+# AI/ML Models
+tensorflow==2.15.0
+tensorflow-metal==1.1.0  # For Apple Silicon acceleration
+crepe==0.0.12           # CREPE pitch detection
+# ddsp==3.4.4           # DDSP synthesis (will install separately)
+torch==2.1.1            # PyTorch support
+torchaudio==2.1.1
+
+# Signal Processing
+pyworld==0.3.4          # WORLD vocoder (fallback option)
+resampy==0.4.2          # Audio resampling
+
+# Web & API
+pydantic==2.5.0
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# File Handling & Utils
+aiofiles==23.2.1
+python-dotenv==1.0.0
+Pillow==10.1.0
+
+# Development & Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+black==23.11.0
+flake8==6.1.0
+
+# Monitoring & Logging
+loguru==0.7.2
+prometheus-client==0.19.0
