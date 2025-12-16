@@ -19,7 +19,15 @@ app = FastAPI(
 # CORS middleware for frontend communication
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        "http://localhost:3000", "http://127.0.0.1:3000",
+        "http://localhost:3001", "http://127.0.0.1:3001",
+        "http://localhost:3002", "http://127.0.0.1:3002",
+        "http://localhost:3003", "http://127.0.0.1:3003",
+        "http://localhost:3004", "http://127.0.0.1:3004",
+        "http://localhost:3005", "http://127.0.0.1:3005",
+        "http://localhost:3006", "http://127.0.0.1:3006"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -54,10 +62,10 @@ async def health_check():
     }
 
 
-# Import and include API routes (will be created later)
-# from api import audio, processing
-# app.include_router(audio.router, prefix="/api/v1")
-# app.include_router(processing.router, prefix="/api/v1")
+# Import and include API routes
+from api.audio_routes import router as audio_router
+
+app.include_router(audio_router)
 
 
 if __name__ == "__main__":
