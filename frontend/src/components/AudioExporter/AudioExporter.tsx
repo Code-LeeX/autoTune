@@ -29,13 +29,15 @@ interface AudioExporterProps {
   sessionId?: string;
   hasOriginal?: boolean;
   hasCorrected?: boolean;
+  hasMixed?: boolean;
+  hasProcessed?: boolean;
   onError?: (error: string) => void;
 }
 
 interface ExportState {
   formats: AudioExportFormat[];
   selectedFormat: string;
-  fileType: 'original' | 'corrected';
+  fileType: 'original' | 'corrected' | 'mixed' | 'processed';
   isLoading: boolean;
   isDownloading: boolean;
   error?: string;
@@ -45,6 +47,8 @@ export const AudioExporter: React.FC<AudioExporterProps> = ({
   sessionId,
   hasOriginal = false,
   hasCorrected = false,
+  hasMixed = false,
+  hasProcessed = false,
   onError
 }) => {
   const [exportState, setExportState] = useState<ExportState>({
@@ -116,9 +120,11 @@ export const AudioExporter: React.FC<AudioExporterProps> = ({
 
   const selectedFormatInfo = exportState.formats.find(f => f.id === exportState.selectedFormat);
   const canDownload = sessionId && ((hasOriginal && exportState.fileType === 'original') ||
-                                   (hasCorrected && exportState.fileType === 'corrected'));
+                                   (hasCorrected && exportState.fileType === 'corrected') ||
+                                   (hasMixed && exportState.fileType === 'mixed') ||
+                                   (hasProcessed && exportState.fileType === 'processed'));
 
-  if (!hasOriginal && !hasCorrected) {
+  if (!hasOriginal && !hasCorrected && !hasMixed && !hasProcessed) {
     return (
       <Paper elevation={2} sx={{ p: 3, textAlign: 'center' }}>
         <AudioFileIcon sx={{ fontSize: 48, color: 'text.secondary', mb: 2 }} />
@@ -170,7 +176,7 @@ export const AudioExporter: React.FC<AudioExporterProps> = ({
               label="Audio Type"
               onChange={(e) => setExportState(prev => ({
                 ...prev,
-                fileType: e.target.value as 'original' | 'corrected'
+                fileType: e.target.value as 'original' | 'corrected' | 'mixed' | 'processed'
               }))}
             >
               {hasOriginal && (
@@ -178,6 +184,12 @@ export const AudioExporter: React.FC<AudioExporterProps> = ({
               )}
               {hasCorrected && (
                 <MenuItem value="corrected">Corrected Audio</MenuItem>
+              )}
+              {hasMixed && (
+                <MenuItem value="mixed">Mixed Audio</MenuItem>
+              )}
+              {hasProcessed && (
+                <MenuItem value="processed">Processed Audio</MenuItem>
               )}
             </Select>
           </FormControl>

@@ -19,6 +19,8 @@ from pydantic import BaseModel, Field
 
 from models.pitch_detector import CreepePitchDetector
 from models.audio_synthesizer import PitchCorrectionEngine
+from models.audio_mixing_engine import AudioMixingEngine, MixingParams, ProcessingMode
+from audio_processing.mixing_presets import get_preset_manager
 from audio_processing.pitch_quantizer import MusicalScale, VibratoAnalyzer, PitchQuantizer
 from config.settings import Settings
 import logging
@@ -29,6 +31,7 @@ logger = logging.getLogger(__name__)
 settings = Settings()
 pitch_detector = CreepePitchDetector(model_capacity='small', step_size=10)
 correction_engine = PitchCorrectionEngine(sample_rate=44100, frame_period=5.0)
+mixing_engine = AudioMixingEngine(sample_rate=44100)
 
 # Global storage for processing sessions
 processing_sessions: Dict[str, Dict[str, Any]] = {}
@@ -56,10 +59,130 @@ class PitchCorrectionRequest(BaseModel):
 class ProcessingStatus(BaseModel):
     """Processing status response"""
     session_id: str
-    status: str  # 'processing', 'completed', 'error'
+    status: str  # 'uploaded', 'analyzing', 'analyzed', 'correcting', 'corrected', 'mixing', 'mixed', 'processing', 'completed', 'error'
     progress: float = Field(ge=0.0, le=1.0)
     message: str = ""
     data: Optional[Dict[str, Any]] = None
+
+
+class MixingRequest(BaseModel):
+    """Request model for audio mixing"""
+    # Noise Gate / De-breath
+    noise_gate_enabled: bool = Field(default=True)
+    noise_gate_threshold_db: float = Field(default=-35.0, ge=-60.0, le=0.0, description="Noise gate threshold in dB")
+    noise_gate_ratio: float = Field(default=8.0, ge=1.0, le=20.0, description="Noise gate compression ratio")
+    noise_gate_attack_ms: float = Field(default=1.0, ge=0.1, le=100.0, description="Noise gate attack time in ms")
+    noise_gate_release_ms: float = Field(default=150.0, ge=10.0, le=1000.0, description="Noise gate release time in ms")
+
+    # High-pass Filter (Subtractive EQ)
+    highpass_enabled: bool = Field(default=True)
+    highpass_frequency_hz: float = Field(default=80.0, ge=20.0, le=500.0, description="High-pass filter cutoff frequency in Hz")
+
+    # Compressor (Dynamic Control)
+    compressor_enabled: bool = Field(default=True)
+    compressor_threshold_db: float = Field(default=-18.0, ge=-40.0, le=0.0, description="Compressor threshold in dB")
+    compressor_ratio: float = Field(default=3.0, ge=1.0, le=10.0, description="Compressor ratio")
+    compressor_attack_ms: float = Field(default=10.0, ge=0.1, le=100.0, description="Compressor attack time in ms")
+    compressor_release_ms: float = Field(default=100.0, ge=10.0, le=1000.0, description="Compressor release time in ms")
+
+    # Additive EQ - Multi-band for fuller sound
+    eq_enabled: bool = Field(default=True)
+
+    # Low-frequency EQ (Warmth/Body) - 100-200Hz
+    eq_low_enabled: bool = Field(default=True)
+    eq_low_frequency_hz: float = Field(default=150.0, ge=50.0, le=500.0, description="Low EQ frequency for body/warmth in Hz")
+    eq_low_gain_db: float = Field(default=1.0, ge=-6.0, le=6.0, description="Low EQ gain in dB")
+    eq_low_q: float = Field(default=1.0, ge=0.1, le=10.0, description="Low EQ Q factor")
+
+    # Low-mid EQ (Fullness) - 300-500Hz
+    eq_low_mid_enabled: bool = Field(default=True)
+    eq_low_mid_frequency_hz: float = Field(default=400.0, ge=200.0, le=800.0, description="Low-mid EQ frequency for fullness in Hz")
+    eq_low_mid_gain_db: float = Field(default=1.5, ge=-6.0, le=6.0, description="Low-mid EQ gain in dB")
+    eq_low_mid_q: float = Field(default=1.2, ge=0.1, le=10.0, description="Low-mid EQ Q factor")
+
+    # Presence EQ (Clarity) - 2-4kHz
+    eq_presence_frequency_hz: float = Field(default=2800.0, ge=1000.0, le=8000.0, description="Presence EQ frequency for clarity in Hz")
+    eq_presence_gain_db: float = Field(default=1.5, ge=-6.0, le=6.0, description="Presence EQ gain in dB")
+    eq_presence_q: float = Field(default=1.2, ge=0.1, le=10.0, description="Presence EQ Q factor")
+
+    # High-frequency shelf EQ (Air) - 8kHz+
+    eq_high_enabled: bool = Field(default=True)
+    eq_high_frequency_hz: float = Field(default=8000.0, ge=4000.0, le=20000.0, description="High shelf EQ frequency for air in Hz")
+    eq_high_gain_db: float = Field(default=0.8, ge=-6.0, le=6.0, description="High shelf EQ gain in dB")
+    eq_high_q: float = Field(default=0.7, ge=0.1, le=10.0, description="High shelf EQ Q factor")
+
+    # Reverb (Space/Depth)
+    reverb_enabled: bool = Field(default=True)
+    reverb_type: str = Field(default="algorithm", description="Reverb type: 'algorithm' or 'convolution'")
+    reverb_room_size: float = Field(default=0.2, ge=0.0, le=1.0, description="Reverb room size")
+    reverb_damping: float = Field(default=0.6, ge=0.0, le=1.0, description="Reverb damping")
+    reverb_wet_level: float = Field(default=0.12, ge=0.0, le=0.5, description="Reverb wet level (dry/wet mix)")
+    reverb_width: float = Field(default=1.0, ge=0.0, le=1.0, description="Reverb stereo width")
+
+    def to_mixing_params(self) -> MixingParams:
+        """Convert API request to internal MixingParams"""
+        return MixingParams(
+            noise_gate_enabled=self.noise_gate_enabled,
+            noise_gate_threshold_db=self.noise_gate_threshold_db,
+            noise_gate_ratio=self.noise_gate_ratio,
+            noise_gate_attack_ms=self.noise_gate_attack_ms,
+            noise_gate_release_ms=self.noise_gate_release_ms,
+            highpass_enabled=self.highpass_enabled,
+            highpass_frequency_hz=self.highpass_frequency_hz,
+            compressor_enabled=self.compressor_enabled,
+            compressor_threshold_db=self.compressor_threshold_db,
+            compressor_ratio=self.compressor_ratio,
+            compressor_attack_ms=self.compressor_attack_ms,
+            compressor_release_ms=self.compressor_release_ms,
+            eq_enabled=self.eq_enabled,
+            eq_low_enabled=self.eq_low_enabled,
+            eq_low_frequency_hz=self.eq_low_frequency_hz,
+            eq_low_gain_db=self.eq_low_gain_db,
+            eq_low_q=self.eq_low_q,
+            eq_low_mid_enabled=self.eq_low_mid_enabled,
+            eq_low_mid_frequency_hz=self.eq_low_mid_frequency_hz,
+            eq_low_mid_gain_db=self.eq_low_mid_gain_db,
+            eq_low_mid_q=self.eq_low_mid_q,
+            eq_presence_frequency_hz=self.eq_presence_frequency_hz,
+            eq_presence_gain_db=self.eq_presence_gain_db,
+            eq_presence_q=self.eq_presence_q,
+            eq_high_enabled=self.eq_high_enabled,
+            eq_high_frequency_hz=self.eq_high_frequency_hz,
+            eq_high_gain_db=self.eq_high_gain_db,
+            eq_high_q=self.eq_high_q,
+            reverb_enabled=self.reverb_enabled,
+            reverb_type=self.reverb_type,
+            reverb_room_size=self.reverb_room_size,
+            reverb_damping=self.reverb_damping,
+            reverb_wet_level=self.reverb_wet_level,
+            reverb_width=self.reverb_width
+        )
+
+
+class FullProcessRequest(BaseModel):
+    """Request model for combined pitch correction and mixing"""
+    # Processing mode
+    processing_order: str = Field(default="pitch_first", description="Processing order: 'pitch_first', 'mix_first'")
+
+    # Pitch correction parameters (optional)
+    pitch_correction_enabled: bool = Field(default=True)
+    key: str = Field(default="C", description="Musical key")
+    scale_type: str = Field(default="major", description="Scale type")
+    correction_strength: float = Field(default=0.8, ge=0.0, le=1.0)
+    preserve_vibrato: bool = Field(default=True)
+    preserve_formants: bool = Field(default=True)
+    smoothing_factor: float = Field(default=0.1, ge=0.0, le=1.0)
+
+    # Mixing parameters (optional)
+    mixing_enabled: bool = Field(default=True)
+    mixing_params: Optional[MixingRequest] = None
+
+
+class MixingPresetResponse(BaseModel):
+    """Response model for mixing presets"""
+    name: str
+    description: str
+    params: MixingRequest
 
 
 class ConnectionManager:
@@ -500,7 +623,7 @@ async def download_audio(session_id: str, file_type: str, format: str = "wav"):
 
     Args:
         session_id: Session ID
-        file_type: 'original' or 'corrected'
+        file_type: 'original', 'corrected', 'mixed', or 'processed'
         format: Output format ('wav', 'mp3', 'flac', 'm4a', 'ogg')
 
     Returns:
@@ -529,8 +652,18 @@ async def download_audio(session_id: str, file_type: str, format: str = "wav"):
                 raise HTTPException(status_code=400, detail="No corrected audio available")
             source_path = session['corrected_file']
             base_filename = f"corrected_{session_id}"
+        elif file_type == 'mixed':
+            if 'mixed_file' not in session:
+                raise HTTPException(status_code=400, detail="No mixed audio available")
+            source_path = session['mixed_file']
+            base_filename = f"mixed_{session_id}"
+        elif file_type == 'processed':
+            if 'processed_file' not in session:
+                raise HTTPException(status_code=400, detail="No fully processed audio available")
+            source_path = session['processed_file']
+            base_filename = f"processed_{session_id}"
         else:
-            raise HTTPException(status_code=400, detail="Invalid file type")
+            raise HTTPException(status_code=400, detail="Invalid file type. Supported: 'original', 'corrected', 'mixed', 'processed'")
 
         if not os.path.exists(source_path):
             raise HTTPException(status_code=404, detail="File not found")
@@ -791,3 +924,493 @@ async def list_active_sessions():
             for sid, session in processing_sessions.items()
         }
     }
+
+
+# =================== MIXING API ROUTES ===================
+
+@router.post("/mix/{session_id}", response_model=ProcessingStatus)
+async def apply_mixing(session_id: str, request: MixingRequest):
+    """
+    Apply audio mixing effects to uploaded audio
+
+    Args:
+        session_id: Session ID
+        request: Mixing parameters
+
+    Returns:
+        Mixing processing results
+    """
+    try:
+        if session_id not in processing_sessions:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        session = processing_sessions[session_id]
+
+        # Can apply mixing to uploaded or analyzed audio (no need for pitch correction)
+        if session['status'] not in ['uploaded', 'analyzed', 'corrected']:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid session status: {session['status']}. Audio must be uploaded first."
+            )
+
+        # Update status
+        session['status'] = 'mixing'
+        await manager.send_update(session_id, ProcessingStatus(
+            session_id=session_id,
+            status='mixing',
+            progress=0.0,
+            message="Initializing audio mixing..."
+        ))
+
+        # Get audio data - use corrected audio if available, otherwise original
+        if 'corrected_file' in session and os.path.exists(session['corrected_file']):
+            # Use corrected audio as input
+            audio_data, sample_rate = librosa.load(session['corrected_file'], sr=None, mono=True)
+            source_type = 'corrected'
+        else:
+            # Use original audio as input
+            audio_data = session['audio_data']
+            sample_rate = session['sample_rate']
+            source_type = 'original'
+
+        temp_dir = Path(session['temp_dir'])
+
+        # Convert API request to internal parameters
+        mixing_params = request.to_mixing_params()
+
+        # Apply mixing effects
+        await manager.send_update(session_id, ProcessingStatus(
+            session_id=session_id,
+            status='mixing',
+            progress=0.3,
+            message="Applying noise gate and dynamics processing..."
+        ))
+
+        processed_audio = await mixing_engine.process_audio(audio_data, mixing_params)
+
+        # Save mixed audio
+        await manager.send_update(session_id, ProcessingStatus(
+            session_id=session_id,
+            status='mixing',
+            progress=0.8,
+            message="Saving mixed audio..."
+        ))
+
+        mixed_file = temp_dir / "mixed.wav"
+        sf.write(mixed_file, processed_audio, sample_rate)
+
+        # Get processing chain information
+        chain_info = mixing_engine.get_chain_info(mixing_params)
+
+        # Store results
+        session['mixed_file'] = str(mixed_file)
+        session['mixing_params'] = request.model_dump()
+        session['mixing_chain_info'] = chain_info
+        session['status'] = 'mixed'
+
+        # Prepare response data
+        response_data = {
+            'chain_info': chain_info,
+            'source_audio': source_type,
+            'processing_details': {
+                'effects_applied': chain_info['total_effects'],
+                'enabled_effects': [effect['name'] for effect in chain_info['enabled_effects']]
+            }
+        }
+
+        logger.info(f"Audio mixing completed: {session_id}, "
+                   f"applied {chain_info['total_effects']} effects")
+
+        # Send completion notification
+        completion_status = ProcessingStatus(
+            session_id=session_id,
+            status='mixed',
+            progress=1.0,
+            message="Audio mixing completed successfully",
+            data=response_data
+        )
+
+        await manager.send_update(session_id, completion_status)
+        return completion_status
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Audio mixing failed for {session_id}: {e}")
+        traceback.print_exc()
+        if session_id in processing_sessions:
+            processing_sessions[session_id]['status'] = 'error'
+        raise HTTPException(status_code=500, detail=f"Mixing failed: {str(e)}")
+
+
+@router.post("/process/{session_id}", response_model=ProcessingStatus)
+async def full_process_audio(session_id: str, request: FullProcessRequest):
+    """
+    Apply combined pitch correction and mixing to audio
+
+    Args:
+        session_id: Session ID
+        request: Full processing parameters
+
+    Returns:
+        Combined processing results
+    """
+    try:
+        if session_id not in processing_sessions:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        session = processing_sessions[session_id]
+
+        # Must have analyzed audio for full processing
+        if session['status'] not in ['analyzed', 'corrected']:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Audio must be analyzed first for full processing"
+            )
+
+        # Update status
+        session['status'] = 'processing'
+        await manager.send_update(session_id, ProcessingStatus(
+            session_id=session_id,
+            status='processing',
+            progress=0.0,
+            message="Starting combined audio processing..."
+        ))
+
+        # Get initial audio data
+        audio_data = session['audio_data']
+        sample_rate = session['sample_rate']
+        current_audio = audio_data.copy()
+        temp_dir = Path(session['temp_dir'])
+
+        processing_results = {}
+
+        if request.processing_order == "pitch_first":
+            # Step 1: Pitch correction (if enabled)
+            if request.pitch_correction_enabled:
+                await manager.send_update(session_id, ProcessingStatus(
+                    session_id=session_id,
+                    status='processing',
+                    progress=0.1,
+                    message="Applying pitch correction..."
+                ))
+
+                pitch_data = session['pitch_data']
+
+                # Initialize musical scale and quantizer
+                scale = MusicalScale(
+                    key=request.key,
+                    scale_type=request.scale_type,
+                    reference_freq=440.0
+                )
+
+                vibrato_analyzer = VibratoAnalyzer()
+                quantizer = PitchQuantizer(scale, vibrato_analyzer)
+
+                # Quantize pitch trajectory
+                quantization_result = quantizer.quantize_pitch_trajectory(
+                    time=pitch_data['time'],
+                    frequency=pitch_data['frequency'],
+                    confidence=pitch_data['confidence'],
+                    correction_strength=request.correction_strength,
+                    preserve_vibrato=request.preserve_vibrato,
+                    smoothing_factor=request.smoothing_factor
+                )
+
+                target_f0 = quantization_result['quantized_frequency']
+
+                # Apply pitch correction
+                correction_result = correction_engine.correct_pitch(
+                    audio=current_audio,
+                    target_f0=target_f0,
+                    correction_strength=request.correction_strength,
+                    preserve_formants=request.preserve_formants,
+                    smoothing_factor=request.smoothing_factor
+                )
+
+                current_audio = correction_result['corrected_audio']
+                processing_results['pitch_correction'] = {
+                    'applied': True,
+                    'quantization_result': quantization_result
+                }
+
+            # Step 2: Mixing (if enabled)
+            if request.mixing_enabled and request.mixing_params:
+                await manager.send_update(session_id, ProcessingStatus(
+                    session_id=session_id,
+                    status='processing',
+                    progress=0.6,
+                    message="Applying audio mixing effects..."
+                ))
+
+                mixing_params = request.mixing_params.to_mixing_params()
+                current_audio = await mixing_engine.process_audio(current_audio, mixing_params)
+
+                chain_info = mixing_engine.get_chain_info(mixing_params)
+                processing_results['mixing'] = {
+                    'applied': True,
+                    'chain_info': chain_info
+                }
+
+        else:  # mix_first
+            # Step 1: Mixing (if enabled)
+            if request.mixing_enabled and request.mixing_params:
+                await manager.send_update(session_id, ProcessingStatus(
+                    session_id=session_id,
+                    status='processing',
+                    progress=0.1,
+                    message="Applying audio mixing effects..."
+                ))
+
+                mixing_params = request.mixing_params.to_mixing_params()
+                current_audio = await mixing_engine.process_audio(current_audio, mixing_params)
+
+                chain_info = mixing_engine.get_chain_info(mixing_params)
+                processing_results['mixing'] = {
+                    'applied': True,
+                    'chain_info': chain_info
+                }
+
+            # Step 2: Pitch correction (if enabled)
+            if request.pitch_correction_enabled:
+                await manager.send_update(session_id, ProcessingStatus(
+                    session_id=session_id,
+                    status='processing',
+                    progress=0.6,
+                    message="Applying pitch correction..."
+                ))
+
+                # Note: For mix_first mode, we would need to re-analyze pitch on mixed audio
+                # For now, we'll use the original pitch analysis
+                pitch_data = session['pitch_data']
+
+                scale = MusicalScale(
+                    key=request.key,
+                    scale_type=request.scale_type,
+                    reference_freq=440.0
+                )
+
+                vibrato_analyzer = VibratoAnalyzer()
+                quantizer = PitchQuantizer(scale, vibrato_analyzer)
+
+                quantization_result = quantizer.quantize_pitch_trajectory(
+                    time=pitch_data['time'],
+                    frequency=pitch_data['frequency'],
+                    confidence=pitch_data['confidence'],
+                    correction_strength=request.correction_strength,
+                    preserve_vibrato=request.preserve_vibrato,
+                    smoothing_factor=request.smoothing_factor
+                )
+
+                target_f0 = quantization_result['quantized_frequency']
+
+                correction_result = correction_engine.correct_pitch(
+                    audio=current_audio,
+                    target_f0=target_f0,
+                    correction_strength=request.correction_strength,
+                    preserve_formants=request.preserve_formants,
+                    smoothing_factor=request.smoothing_factor
+                )
+
+                current_audio = correction_result['corrected_audio']
+                processing_results['pitch_correction'] = {
+                    'applied': True,
+                    'quantization_result': quantization_result
+                }
+
+        # Save processed audio
+        await manager.send_update(session_id, ProcessingStatus(
+            session_id=session_id,
+            status='processing',
+            progress=0.9,
+            message="Saving processed audio..."
+        ))
+
+        processed_file = temp_dir / "processed.wav"
+        sf.write(processed_file, current_audio, sample_rate)
+
+        # Store results
+        session['processed_file'] = str(processed_file)
+        session['full_processing_params'] = request.model_dump()
+        session['processing_results'] = processing_results
+        session['status'] = 'completed'
+
+        response_data = {
+            'processing_order': request.processing_order,
+            'results': processing_results,
+            'output_file': 'processed.wav'
+        }
+
+        logger.info(f"Full audio processing completed: {session_id}, "
+                   f"order: {request.processing_order}")
+
+        # Send completion notification
+        completion_status = ProcessingStatus(
+            session_id=session_id,
+            status='completed',
+            progress=1.0,
+            message="Full audio processing completed successfully",
+            data=response_data
+        )
+
+        await manager.send_update(session_id, completion_status)
+        return completion_status
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Full audio processing failed for {session_id}: {e}")
+        traceback.print_exc()
+        if session_id in processing_sessions:
+            processing_sessions[session_id]['status'] = 'error'
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+
+
+@router.get("/mixing/presets")
+async def get_mixing_presets():
+    """
+    Get list of available mixing presets
+
+    Returns:
+        List of mixing presets with parameters
+    """
+    try:
+        presets = []
+        preset_manager = get_preset_manager()
+
+        for preset_name in preset_manager.list_presets():
+            preset_params = preset_manager.get_preset(preset_name)
+            preset_metadata = preset_manager.get_preset_metadata(preset_name)
+
+            if preset_params and preset_metadata:
+                # Convert internal MixingParams to API MixingRequest format
+                api_params = MixingRequest(
+                    noise_gate_enabled=preset_params.noise_gate_enabled,
+                    noise_gate_threshold_db=preset_params.noise_gate_threshold_db,
+                    noise_gate_ratio=preset_params.noise_gate_ratio,
+                    noise_gate_attack_ms=preset_params.noise_gate_attack_ms,
+                    noise_gate_release_ms=preset_params.noise_gate_release_ms,
+                    highpass_enabled=preset_params.highpass_enabled,
+                    highpass_frequency_hz=preset_params.highpass_frequency_hz,
+                    compressor_enabled=preset_params.compressor_enabled,
+                    compressor_threshold_db=preset_params.compressor_threshold_db,
+                    compressor_ratio=preset_params.compressor_ratio,
+                    compressor_attack_ms=preset_params.compressor_attack_ms,
+                    compressor_release_ms=preset_params.compressor_release_ms,
+                    eq_enabled=preset_params.eq_enabled,
+                    eq_low_enabled=preset_params.eq_low_enabled,
+                    eq_low_frequency_hz=preset_params.eq_low_frequency_hz,
+                    eq_low_gain_db=preset_params.eq_low_gain_db,
+                    eq_low_q=preset_params.eq_low_q,
+                    eq_low_mid_enabled=preset_params.eq_low_mid_enabled,
+                    eq_low_mid_frequency_hz=preset_params.eq_low_mid_frequency_hz,
+                    eq_low_mid_gain_db=preset_params.eq_low_mid_gain_db,
+                    eq_low_mid_q=preset_params.eq_low_mid_q,
+                    eq_presence_frequency_hz=preset_params.eq_presence_frequency_hz,
+                    eq_presence_gain_db=preset_params.eq_presence_gain_db,
+                    eq_presence_q=preset_params.eq_presence_q,
+                    eq_high_enabled=preset_params.eq_high_enabled,
+                    eq_high_frequency_hz=preset_params.eq_high_frequency_hz,
+                    eq_high_gain_db=preset_params.eq_high_gain_db,
+                    eq_high_q=preset_params.eq_high_q,
+                    reverb_enabled=preset_params.reverb_enabled,
+                    reverb_type=preset_params.reverb_type,
+                    reverb_room_size=preset_params.reverb_room_size,
+                    reverb_damping=preset_params.reverb_damping,
+                    reverb_wet_level=preset_params.reverb_wet_level,
+                    reverb_width=preset_params.reverb_width
+                )
+
+                presets.append({
+                    "id": preset_name,
+                    "name": preset_metadata.name,
+                    "description": preset_metadata.description,
+                    "category": preset_metadata.category,
+                    "difficulty": preset_metadata.difficulty,
+                    "use_cases": preset_metadata.use_cases,
+                    "params": api_params.model_dump()
+                })
+
+        return {
+            "presets": presets,
+            "total_presets": len(presets)
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get mixing presets: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get presets: {str(e)}")
+
+
+@router.get("/mixing/preset/{preset_name}")
+async def get_mixing_preset_by_name(preset_name: str):
+    """
+    Get specific mixing preset by name
+
+    Args:
+        preset_name: Name of the preset to retrieve
+
+    Returns:
+        Preset parameters
+    """
+    try:
+        preset_manager = get_preset_manager()
+
+        preset_params = preset_manager.get_preset(preset_name)
+        preset_metadata = preset_manager.get_preset_metadata(preset_name)
+
+        if not preset_params or not preset_metadata:
+            raise HTTPException(status_code=404, detail=f"Preset '{preset_name}' not found")
+
+        # Convert to API format
+        api_params = MixingRequest(
+            noise_gate_enabled=preset_params.noise_gate_enabled,
+            noise_gate_threshold_db=preset_params.noise_gate_threshold_db,
+            noise_gate_ratio=preset_params.noise_gate_ratio,
+            noise_gate_attack_ms=preset_params.noise_gate_attack_ms,
+            noise_gate_release_ms=preset_params.noise_gate_release_ms,
+            highpass_enabled=preset_params.highpass_enabled,
+            highpass_frequency_hz=preset_params.highpass_frequency_hz,
+            compressor_enabled=preset_params.compressor_enabled,
+            compressor_threshold_db=preset_params.compressor_threshold_db,
+            compressor_ratio=preset_params.compressor_ratio,
+            compressor_attack_ms=preset_params.compressor_attack_ms,
+            compressor_release_ms=preset_params.compressor_release_ms,
+            eq_enabled=preset_params.eq_enabled,
+            eq_low_enabled=preset_params.eq_low_enabled,
+            eq_low_frequency_hz=preset_params.eq_low_frequency_hz,
+            eq_low_gain_db=preset_params.eq_low_gain_db,
+            eq_low_q=preset_params.eq_low_q,
+            eq_low_mid_enabled=preset_params.eq_low_mid_enabled,
+            eq_low_mid_frequency_hz=preset_params.eq_low_mid_frequency_hz,
+            eq_low_mid_gain_db=preset_params.eq_low_mid_gain_db,
+            eq_low_mid_q=preset_params.eq_low_mid_q,
+            eq_presence_frequency_hz=preset_params.eq_presence_frequency_hz,
+            eq_presence_gain_db=preset_params.eq_presence_gain_db,
+            eq_presence_q=preset_params.eq_presence_q,
+            eq_high_enabled=preset_params.eq_high_enabled,
+            eq_high_frequency_hz=preset_params.eq_high_frequency_hz,
+            eq_high_gain_db=preset_params.eq_high_gain_db,
+            eq_high_q=preset_params.eq_high_q,
+            reverb_enabled=preset_params.reverb_enabled,
+            reverb_type=preset_params.reverb_type,
+            reverb_room_size=preset_params.reverb_room_size,
+            reverb_damping=preset_params.reverb_damping,
+            reverb_wet_level=preset_params.reverb_wet_level,
+            reverb_width=preset_params.reverb_width
+        )
+
+        return {
+            "id": preset_name,
+            "name": preset_metadata.name,
+            "description": preset_metadata.description,
+            "category": preset_metadata.category,
+            "difficulty": preset_metadata.difficulty,
+            "use_cases": preset_metadata.use_cases,
+            "params": api_params.model_dump()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get preset {preset_name}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get preset: {str(e)}")

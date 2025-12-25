@@ -10,12 +10,16 @@ import { WaveformViewer } from './components/WaveformViewer/WaveformViewer';
 import { ParameterPanel } from './components/ParameterPanel/ParameterPanel';
 import { AudioPlayer } from './components/AudioPlayer/AudioPlayer';
 import { AudioExporter } from './components/AudioExporter/AudioExporter';
+import { MixingPanel } from './components/MixingPanel/MixingPanel';
+import { ProcessingModeSelector } from './components/ProcessingModeSelector/ProcessingModeSelector';
 
 import {
   AudioUploadResponse,
   ProcessingStatus,
   PitchAnalysisData,
-  CorrectionResult
+  CorrectionResult,
+  ProcessingMode,
+  MixingParams
 } from './api/audioApi';
 
 // Create dark theme for professional audio app look
@@ -44,7 +48,10 @@ interface AppState {
   uploadResult?: AudioUploadResponse;
   analysisResult?: PitchAnalysisData;
   correctionResult?: CorrectionResult;
-  currentStep: 'upload' | 'analyze' | 'correct' | 'complete';
+  mixingResult?: any; // Mixed audio processing result
+  processingResult?: any; // Full processing result (pitch + mixing)
+  processingMode: ProcessingMode;
+  currentStep: 'upload' | 'mode_select' | 'analyze' | 'correct' | 'mixing' | 'processing' | 'complete';
 }
 
 // Playback state interface
@@ -56,7 +63,12 @@ interface PlaybackState {
 
 function App() {
   const [appState, setAppState] = useState<AppState>({
-    currentStep: 'upload'
+    currentStep: 'upload',
+    processingMode: {
+      pitchCorrection: true,
+      mixing: false,
+      processingOrder: 'pitch_first'
+    }
   });
 
   const [notification, setNotification] = useState<{
@@ -82,7 +94,7 @@ function App() {
       ...prev,
       sessionId,
       uploadResult,
-      currentStep: 'analyze'
+      currentStep: 'mode_select'
     }));
 
     setNotification({
@@ -129,6 +141,71 @@ function App() {
     });
   }, []);
 
+  // Handle processing mode selection
+  const handleProcessingModeChange = useCallback(async (mode: ProcessingMode) => {
+    console.log('Processing mode changed:', mode);
+    setAppState(prev => ({
+      ...prev,
+      processingMode: mode
+    }));
+
+    // Determine next step based on processing mode
+    if (mode.pitchCorrection && !appState.analysisResult) {
+      // Need pitch analysis - user will need to manually start analysis
+      setAppState(prev => ({ ...prev, currentStep: 'analyze' }));
+    } else if (mode.mixing && !mode.pitchCorrection) {
+      // Mixing only - go directly to mixing
+      setAppState(prev => ({ ...prev, currentStep: 'mixing' }));
+    } else if (mode.pitchCorrection && mode.mixing && appState.analysisResult) {
+      // Complete processing with existing analysis - go to correct step
+      setAppState(prev => ({ ...prev, currentStep: 'correct' }));
+    } else if (mode.pitchCorrection && appState.analysisResult) {
+      // Pitch correction only with existing analysis
+      setAppState(prev => ({ ...prev, currentStep: 'correct' }));
+    } else {
+      // Default case - need analysis
+      setAppState(prev => ({ ...prev, currentStep: 'analyze' }));
+    }
+
+    setNotification({
+      open: true,
+      message: `Processing mode set: ${mode.pitchCorrection && mode.mixing ? 'Complete Processing' : mode.pitchCorrection ? 'Pitch Correction Only' : 'Mixing Only'}`,
+      severity: 'info'
+    });
+  }, [appState.sessionId, appState.analysisResult]);
+
+  // Handle mixing completion (mixing-only mode)
+  const handleMixingComplete = useCallback((sessionId: string, mixingResult: any) => {
+    console.log('Mixing completed:', sessionId, mixingResult);
+    setAppState(prev => ({
+      ...prev,
+      mixingResult,
+      currentStep: 'complete'
+    }));
+
+    setNotification({
+      open: true,
+      message: 'Audio mixing completed successfully',
+      severity: 'success'
+    });
+  }, []);
+
+  // Handle full processing completion (pitch + mixing)
+  const handleFullProcessingComplete = useCallback((sessionId: string, processingResult: any) => {
+    console.log('Full processing completed:', sessionId, processingResult);
+    setAppState(prev => ({
+      ...prev,
+      processingResult,
+      currentStep: 'complete'
+    }));
+
+    setNotification({
+      open: true,
+      message: 'Complete audio processing finished successfully',
+      severity: 'success'
+    });
+  }, []);
+
   // Handle errors
   const handleError = useCallback((error: string) => {
     console.error('App error:', error);
@@ -147,7 +224,12 @@ function App() {
   // Reset to start over
   const handleReset = useCallback(() => {
     setAppState({
-      currentStep: 'upload'
+      currentStep: 'upload',
+      processingMode: {
+        pitchCorrection: true,
+        mixing: false,
+        processingOrder: 'pitch_first'
+      }
     });
     setPlaybackState({
       isPlaying: false,
@@ -170,15 +252,6 @@ function App() {
       <CssBaseline />
       <Box sx={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
         <Container maxWidth="xl" sx={{ py: 2 }}>
-          {/* Header */}
-          <Box sx={{ mb: 4, textAlign: 'center' }}>
-            <Typography variant="h3" component="h1" gutterBottom>
-              AI Pitch Correction Tool
-            </Typography>
-            <Typography variant="h6" color="text.secondary">
-              Professional pitch correction powered by CREPE + PyWorld
-            </Typography>
-          </Box>
 
           {/* Main Interface Grid */}
           <Box sx={{ display: 'grid', gap: 3, gridTemplateColumns: { xs: '1fr', lg: '2fr 1fr' } }}>
@@ -190,8 +263,17 @@ function App() {
                 onUploadComplete={handleUploadComplete}
                 onAnalysisComplete={handleAnalysisComplete}
                 onError={handleError}
-                autoStartAnalysis={true}
+                autoStartAnalysis={false}
               />
+
+              {/* Processing Mode Selector - Show after upload */}
+              {appState.currentStep === 'mode_select' && appState.sessionId && (
+                <ProcessingModeSelector
+                  value={appState.processingMode}
+                  onChange={handleProcessingModeChange}
+                  hasAnalyzedAudio={!!appState.analysisResult}
+                />
+              )}
 
               {/* Waveform Viewer - Show when analysis is complete */}
               {appState.analysisResult && (
@@ -212,6 +294,8 @@ function App() {
                   sessionId={appState.sessionId}
                   hasOriginal={!!appState.uploadResult}
                   hasCorrected={!!appState.correctionResult}
+                  hasMixed={!!appState.mixingResult}
+                  hasProcessed={!!appState.processingResult}
                   playbackState={playbackState}
                   onPlaybackStateChange={handlePlaybackStateChange}
                 />
@@ -220,20 +304,42 @@ function App() {
 
             {/* Right Panel - Parameters & Controls */}
             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-              <ParameterPanel
-                sessionId={appState.sessionId}
-                analysisResult={appState.analysisResult}
-                onCorrectionComplete={handleCorrectionComplete}
-                onError={handleError}
-                onReset={handleReset}
-                disabled={appState.currentStep !== 'correct'}
-              />
+              {/* Pitch Correction Panel - Show when pitch correction is enabled */}
+              {appState.processingMode.pitchCorrection && (
+                <ParameterPanel
+                  sessionId={appState.sessionId}
+                  analysisResult={appState.analysisResult}
+                  onCorrectionComplete={handleCorrectionComplete}
+                  onError={handleError}
+                  onReset={handleReset}
+                  disabled={appState.currentStep !== 'correct'}
+                />
+              )}
+
+              {/* Mixing Panel - Show when mixing is enabled */}
+              {appState.processingMode.mixing && appState.sessionId && (
+                <MixingPanel
+                  sessionId={appState.sessionId}
+                  processingMode={appState.processingMode}
+                  onMixingComplete={handleMixingComplete}
+                  onFullProcessingComplete={handleFullProcessingComplete}
+                  onError={handleError}
+                  disabled={
+                    appState.currentStep === 'mixing' ? false :
+                    appState.currentStep === 'processing' ? false :
+                    (appState.processingMode.pitchCorrection && appState.processingMode.mixing) ? !appState.correctionResult :
+                    true
+                  }
+                />
+              )}
 
               {/* Audio Export */}
               <AudioExporter
                 sessionId={appState.sessionId}
                 hasOriginal={!!appState.uploadResult}
                 hasCorrected={!!appState.correctionResult}
+                hasMixed={!!appState.mixingResult}
+                hasProcessed={!!appState.processingResult}
                 onError={handleError}
               />
             </Box>

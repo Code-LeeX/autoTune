@@ -20,6 +20,7 @@ torchaudio==2.1.1
 # Signal Processing
 pyworld==0.3.4          # WORLD vocoder (fallback option)
 resampy==0.4.2          # Audio resampling
+pedalboard>=0.9.0       # Professional audio effects processing
 
 # Web & API
 pydantic==2.5.0

@@ -35,7 +35,7 @@ export interface AudioUploadResponse {
 
 export interface ProcessingStatus {
   session_id: string;
-  status: 'uploaded' | 'analyzing' | 'analyzed' | 'correcting' | 'corrected' | 'error';
+  status: 'uploaded' | 'analyzing' | 'analyzed' | 'correcting' | 'corrected' | 'mixing' | 'mixed' | 'processing' | 'processed' | 'error';
   progress: number;
   message: string;
   data?: any;
@@ -96,6 +96,98 @@ export interface AudioExportFormat {
   extension: string;
   mime_type: string;
   is_lossless: boolean;
+}
+
+// Mixing functionality interfaces
+export interface MixingParams {
+  // Noise Gate / De-breath
+  noise_gate_enabled: boolean;
+  noise_gate_threshold_db: number;
+  noise_gate_ratio: number;
+  noise_gate_attack_ms: number;
+  noise_gate_release_ms: number;
+
+  // High-pass filter (Subtractive EQ)
+  highpass_enabled: boolean;
+  highpass_frequency_hz: number;
+
+  // Compressor (Dynamic control)
+  compressor_enabled: boolean;
+  compressor_threshold_db: number;
+  compressor_ratio: number;
+  compressor_attack_ms: number;
+  compressor_release_ms: number;
+
+  // EQ - Multi-band for fuller sound
+  eq_enabled: boolean;
+
+  // Low-frequency EQ (Warmth/Body) - 100-200Hz
+  eq_low_enabled: boolean;
+  eq_low_frequency_hz: number;
+  eq_low_gain_db: number;
+  eq_low_q: number;
+
+  // Low-mid EQ (Fullness) - 300-500Hz
+  eq_low_mid_enabled: boolean;
+  eq_low_mid_frequency_hz: number;
+  eq_low_mid_gain_db: number;
+  eq_low_mid_q: number;
+
+  // Presence EQ (Clarity) - 2-4kHz
+  eq_presence_frequency_hz: number;
+  eq_presence_gain_db: number;
+  eq_presence_q: number;
+
+  // High-frequency shelf EQ (Air) - 8kHz+
+  eq_high_enabled: boolean;
+  eq_high_frequency_hz: number;
+  eq_high_gain_db: number;
+  eq_high_q: number;
+
+  // Reverb
+  reverb_enabled: boolean;
+  reverb_type: string;
+  reverb_room_size: number;
+  reverb_damping: number;
+  reverb_wet_level: number;
+  reverb_width: number;
+}
+
+export interface PresetMetadata {
+  name: string;
+  description: string;
+  category: 'vocal' | 'speech' | 'creative';
+  difficulty: 'beginner' | 'intermediate' | 'advanced';
+  use_cases: string[];
+  tags: string[];
+}
+
+export interface MixingPreset {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  difficulty: string;
+  use_cases: string[];
+  params: MixingParams;
+}
+
+export interface MixingRequest {
+  session_id: string;
+  params: MixingParams;
+}
+
+export interface FullProcessRequest {
+  session_id: string;
+  pitch_params: Omit<PitchCorrectionParams, 'session_id'>;
+  mixing_params: MixingParams;
+  processing_order: 'pitch_first' | 'mix_first';
+}
+
+export interface ProcessingMode {
+  pitchCorrection: boolean;
+  mixing: boolean;
+  processingOrder: 'pitch_first' | 'mix_first';
 }
 
 export class AudioAPI {
@@ -184,7 +276,7 @@ export class AudioAPI {
    */
   static async downloadAudio(
     sessionId: string,
-    fileType: 'original' | 'corrected' = 'corrected',
+    fileType: 'original' | 'corrected' | 'mixed' | 'processed' = 'corrected',
     format: string = 'wav'
   ): Promise<Blob> {
     const url = `${API_BASE_URL}/api/audio/download/${sessionId}/${fileType}?format=${encodeURIComponent(format)}`;
@@ -247,6 +339,89 @@ export class AudioAPI {
 
     if (!response.ok) {
       throw new Error(`Health check failed: ${response.statusText}`);
+    }
+
+    return response.json();
+  }
+
+  /**
+   * Apply mixing effects to uploaded audio
+   */
+  static async mixAudio(
+    sessionId: string,
+    params: MixingParams
+  ): Promise<ProcessingStatus> {
+    const response = await fetch(`${API_BASE_URL}/api/audio/mix/${sessionId}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        session_id: sessionId,
+        params: params,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ detail: response.statusText }));
+      throw new Error(`Mixing failed: ${errorData.detail || response.statusText}`);
+    }
+
+    return response.json();
+  }
+
+  /**
+   * Apply full processing (pitch correction + mixing) to analyzed audio
+   */
+  static async processAudio(
+    sessionId: string,
+    pitchParams: Omit<PitchCorrectionParams, 'session_id'>,
+    mixingParams: MixingParams,
+    processingOrder: 'pitch_first' | 'mix_first' = 'pitch_first'
+  ): Promise<ProcessingStatus> {
+    const response = await fetch(`${API_BASE_URL}/api/audio/process/${sessionId}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        session_id: sessionId,
+        pitch_params: pitchParams,
+        mixing_params: mixingParams,
+        processing_order: processingOrder,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ detail: response.statusText }));
+      throw new Error(`Processing failed: ${errorData.detail || response.statusText}`);
+    }
+
+    return response.json();
+  }
+
+  /**
+   * Get all available mixing presets
+   */
+  static async getMixingPresets(): Promise<MixingPreset[]> {
+    const response = await fetch(`${API_BASE_URL}/api/audio/mixing/presets`);
+
+    if (!response.ok) {
+      throw new Error(`Failed to get mixing presets: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return data.presets;
+  }
+
+  /**
+   * Get specific mixing preset by name
+   */
+  static async getMixingPreset(presetName: string): Promise<MixingPreset> {
+    const response = await fetch(`${API_BASE_URL}/api/audio/mixing/preset/${encodeURIComponent(presetName)}`);
+
+    if (!response.ok) {
+      throw new Error(`Failed to get mixing preset "${presetName}": ${response.statusText}`);
     }
 
     return response.json();
